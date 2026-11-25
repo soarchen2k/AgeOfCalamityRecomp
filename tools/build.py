@@ -89,18 +89,36 @@ def step_extract(args) -> None:
     subprocess.run([sys.executable, str(ROOT / "tools" / "inspect_dump.py"), "--exefs", str(args.exefs)], check=True)
 
 
+def cheat_patches(args) -> Path:
+    """The patch table for the generator: recomp/patches-v130.txt and the code cheats of the game folders' enabled mods
+    (tools/cheats.py, which also writes each folder's build-cache/cheats.status). Rewritten only when it changes, so
+    its time tells step_gen whether the C is out of date."""
+    cheats = args.work / "cheats-patches.txt"
+    dists = [Path(args.dist)] + [d for d in (ROOT / "dist" / "windows",) if d.is_dir() and d != Path(args.dist)]
+    cmd = [sys.executable, str(ROOT / "tools" / "cheats.py"), "--exefs", str(args.exefs), "--out", str(cheats)]
+    for d in dists:
+        cmd += ["--dist", str(d)]
+    subprocess.run(cmd, check=True)
+    table = args.work / "patches.txt"
+    text = PATCHES.read_text(encoding="utf-8") + "\n" + cheats.read_text(encoding="utf-8")
+    if not table.exists() or table.read_text(encoding="utf-8") != text:
+        table.write_text(text, encoding="utf-8")
+    return table
+
+
 def step_gen(args) -> Path:
     out = args.work / "generated"
     manifests = [out / m / "manifest.json" for m in MODULES]
+    table = cheat_patches(args)
     # Changes to the generator or the patch table call for new C; the generator only rewrites the files that changed.
-    inputs = [PATCHES] + list((ROOT / "recomp").glob("*.py"))
+    inputs = [table] + list((ROOT / "recomp").glob("*.py"))
     fresh = all(p.exists() for p in manifests) and \
         min(p.stat().st_mtime for p in manifests) > max(p.stat().st_mtime for p in inputs)
     if fresh and not args.regen:
         print("gen: C already generated and newer than recomp/ (use --regen to redo it)")
         return out
     cmd = [sys.executable, str(ROOT / "recomp" / "gen.py"), "--exefs", str(args.exefs), "--out", str(out),
-           "--modules", ",".join(MODULES), "--patches", str(PATCHES)]
+           "--modules", ",".join(MODULES), "--patches", str(table)]
     # gen.py only measures free memory on Windows; here it limits the workers (each loads the modules: ~1.5 GB).
     jobs = args.jobs or max(1, min(os.cpu_count() or 1, int(mem_available() * 0.8) // GEN_WORKER_MEM or 1))
     cmd += ["--jobs", str(jobs)]
