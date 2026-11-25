@@ -4007,6 +4007,14 @@ const char* ImFont::CalcWordWrapPositionA(float scale, const char* text, const c
 
             // Allow wrapping after punctuation.
             inside_word = (c != '.' && c != ',' && c != ';' && c != '!' && c != '?' && c != '\"');
+            // AgeOfCalamityRecomp: CJK text has no spaces, so a line may also break after any CJK character or
+            // full-width punctuation (the menu's Chinese translation and Chinese cheat names).
+            if ((c >= 0x2E80 && c <= 0x9FFF) || (c >= 0xAC00 && c <= 0xD7AF) || (c >= 0xF900 && c <= 0xFAFF) ||
+                (c >= 0xFF00 && c <= 0xFFEF))
+            {
+                inside_word = false;
+                word_end = next_s;   // the character is a whole word: the next one may start the next line
+            }
         }
 
         // We ignore blank width at the end of the line (they can be skipped)

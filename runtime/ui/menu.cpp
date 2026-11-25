@@ -345,9 +345,15 @@ static uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t
 // directory inside the file (stb_truetype reads tables without bounds checks, so a cut-off file faults when the glyphs
 // are made), and stb_truetype parses it. ImGui asserts on a font it cannot parse, and an assert ends the process with
 // 0xc0000409 and no line in the log.
-static int font_usable(const uint8_t *d, uint64_t n) {
+static int font_usable(const uint8_t *d, uint64_t n, int index = 0) {
     if (!d || n <= 100 || n > INT_MAX) return 0;
-    int off = stbtt_GetFontOffsetForIndex(d, 0);
+    if (!memcmp(d, "ttcf", 4)) {   // a collection: its offset table must hold the face asked for
+        int faces = stbtt_GetNumberOfFonts(d);
+        if (index < 0 || index >= faces || 12 + 4ull * (uint64_t)faces > n) return 0;
+    } else if (index != 0) {
+        return 0;
+    }
+    int off = stbtt_GetFontOffsetForIndex(d, index);
     if (off < 0 || (uint64_t)off + 12 > n) return 0;
     uint32_t tables = (uint32_t)d[off + 4] << 8 | d[off + 5];
     if ((uint64_t)off + 12 + 16ull * tables > n) return 0;
@@ -395,7 +401,12 @@ static int fonts_up(float scale) {
         char path[512];
         uint64_t size = 0;
         if (!plat_font_path(kCjk[i].lang, path, sizeof path) || !(data[i] = plat_file_read(path, &size))) continue;
-        if (!font_usable(data[i], size)) {
+        // A collection with one face per language (Noto Sans CJK: JP, KR, SC, TC, HK) draws each language with its
+        // own face, so Simplified Chinese gets Chinese glyph shapes rather than the Japanese forms of face 0.
+        int face = 0;
+        if (size > 12 && !memcmp(data[i], "ttcf", 4) && stbtt_GetNumberOfFonts(data[i]) >= N && strstr(path, "CJK"))
+            face = i;
+        if (!font_usable(data[i], size, face)) {
             rt_log("menu: system font %s left out: the font parser cannot read it (%llu bytes)", path,
                    (unsigned long long)size);
             free(data[i]);
@@ -406,8 +417,20 @@ static int fonts_up(float scale) {
         ImFontGlyphRangesBuilder b;
         b.AddText(ui_text_in("en", kCjk[i].name));
         ui_text_visit(kCjk[i].lang, add_row_glyphs, &b);
+        if (!strcmp(kCjk[i].lang, "zh-Hans")) {
+            // Names from the player's files (cheat names, mod folders) are shown in any menu language: the Simplified
+            // Chinese font also takes their glyphs, so a cheat file in Chinese is not drawn as '?'.
+            for (int j = 0; j < cheats_count(); j++) {
+                const CheatInfo *c = cheats_info(j);
+                if (c && c->name) b.AddText(c->name);
+                if (c && c->mod) b.AddText(c->mod);
+            }
+            for (int j = 0; j < mods_count(); j++)
+                if (const ModInfo *m = mods_at(j)) b.AddText(m->name);
+        }
         b.BuildRanges(&ranges[i]);
         ImFontConfig mc;
+        mc.FontNo = face;
         mc.MergeMode = true;
         mc.FontDataOwnedByAtlas = false;
         fa->AddFontFromMemoryTTF(data[i], (int)size, 26.0f * scale, &mc, ranges[i].Data);
@@ -1261,10 +1284,16 @@ static void layout_menu(uint32_t w, uint32_t h, float scale) {
 
     const ImGuiStyle &st = ImGui::GetStyle();
     float bottom = ImGui::GetFrameHeight() + st.ItemSpacing.y * 2;
+    // Two spaces each side of a tab's name when every tab fits with them, else none: the tab bar shrinks tabs that do
+    // not fit and cuts their names ("Ami..."), which nine tabs did at 1280x800 and in Chinese.
+    float tabs_w = 0, pad_w = ImGui::CalcTextSize("    ").x;
+    for (int k = 0; k < TAB_COUNT; k++)
+        tabs_w += ImGui::CalcTextSize(menu_text(kTabNames[k])).x + st.FramePadding.x * 2 + st.ItemInnerSpacing.x;
+    const char *pad = tabs_w + pad_w * TAB_COUNT <= ImGui::GetContentRegionAvail().x ? "  " : "";
     if (ImGui::BeginTabBar("##tabs", ImGuiTabBarFlags_NoTabListScrollingButtons)) {
         for (int k = 0; k < TAB_COUNT; k++) {
             char label[128];
-            snprintf(label, sizeof label, "  %s  ###tab%d", menu_text(kTabNames[k]), k);   // the id stays per language
+            snprintf(label, sizeof label, "%s%s%s###tab%d", pad, menu_text(kTabNames[k]), pad, k);   // the id stays per language
             if (!ImGui::BeginTabItem(label, nullptr, g_tab_request == k ? ImGuiTabItemFlags_SetSelected : 0)) continue;
             g_tab = k;
             if (g_focus_page == k) {
