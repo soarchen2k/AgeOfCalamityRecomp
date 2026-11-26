@@ -16,3 +16,8 @@ uint32_t prompts_gen(void);
 // A texture upload's blocks (w x h, BC3 when bc3, size bytes in rows): 1 when they are one of the game's button
 // textures (the selected file's blocks are then copied over them; the game's own stay with none selected), else 0.
 int prompts_swap(uint32_t w, uint32_t h, int bc3, uint8_t *blocks, size_t size);
+// The pad in use: its layout (input_map.h PAD_LAYOUT_*: 0 Nintendo, 1 Xbox) and, for Switch A, B, X, Y, the face button
+// that presses it (0 south, 1 east, 2 west, 3 north; -1 none). A change bumps prompts_gen, and the button atlas
+// uploads again with the icons of remapped buttons moved: each button shows the one that now presses it.
+enum { PROMPTS_LAYOUTS = 2 };
+void prompts_face(int layout, const int8_t phys[4]);

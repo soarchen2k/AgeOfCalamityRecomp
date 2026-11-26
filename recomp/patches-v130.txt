@@ -68,6 +68,22 @@ site output main 151e19c b94007e8 0e0c3e68                            # ldr w8,[
 # the target and x22 the source there (the rect's base); v16 and v17 are scratch (no use in the function).
 set  hold   ACR_PATCH_HOLD   0
 site hold   main 161e888 910103e4 fd402eb0 fd402ed1 2e21da10 2e21da31 2e31fe10 0f03f611 0e31f610 6e180610 3dc013f1 4e21da31 6e30de31 4e21aa31 3d8017f1 910143e4   # add x4,sp,#0x40 -> scaled copy at sp+0x50
+# Issue #16: the end of the first mission on a new save crashed in an update worker (main+0xfa01f0 reading
+# 0xfffffffffffff698). Three sibling functions (main+0xfa01f0, +0xfa0770, +0xfa0d70: an on-screen marker of a unit) look
+# up a list for an entry of type 0x59, 0x5a or 0x5b with no end: the list ([[0x700277ca68]+0x111ed8]: count at +0x10,
+# entries at +8, as the game's other walks of it read it, e.g. main+0xf9e7c8) lost that entry during the mission's end,
+# so the walk ran off the list's end. The walk now stops at the count and the function returns without updating
+# the marker (its epilogue). x12 (the end) and x13 are free in these functions.
+set  endlist ACR_PATCH_ENDLIST 1
+site endlist main fa0340 f9400508 f940090c f9400508 8b0c0d0c   # ldr x8,[x8,#8] -> x12 = end ; x8 = first entry
+site endlist main fa0344 14000002 d1002108 14000001            # b 0xfa034c -> sub x8,x8,#8 ; b 0xfa0348 (checked)
+site endlist main fa0348 91002108 91002108 cb08018d b4001dcd   # add x8,x8,#8 ; x13 = end - x8 ; cbz x13, 0xfa0700
+site endlist main fa08cc f9400508 f940090c f9400508 8b0c0d0c
+site endlist main fa08d0 14000002 d1002108 14000001
+site endlist main fa08d4 91002108 91002108 cb08018d b400212d   # cbz x13, 0xfa0cf8
+site endlist main fa0ed4 f9400508 f940090c f9400508 8b0c0d0c
+site endlist main fa0ed8 14000002 d1002108 14000001
+site endlist main fa0edc 91002108 91002108 cb08018d b400212d   # cbz x13, 0xfa1300
 # Frame rates above 60 (runtime/frame_rate.c). The game steps by whole 60 Hz vsyncs: its frame-rate block at
 # main+0x269e150 is {fps, vsyncs per update, fps, fps as a float}, and 159 instructions read the vsyncs (+0x154). 104 of
 # them load it into a float register and convert it (ucvtf / scvtf) in a straight line, without a branch or a branch

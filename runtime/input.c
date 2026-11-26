@@ -18,6 +18,7 @@
 #include "input_map.h"
 #include "input_wsys.h"
 #include "nvn_api.h"
+#include "prompts.h"
 #include "ui/menu.h"
 #include "vk.h"
 #include "platform/platform.h"
@@ -565,10 +566,23 @@ static int pad_physical(uint8_t pd[PAD_COUNT]) {
 
 // Under lock, state 1: the open gamepad's buttons (Switch bits after ACR_PAD_LAYOUT and the ACR_BIND_* lines) and
 // sticks; 0 without a connected gamepad.
+// The face button that presses each of Switch A, B, X, Y in layout (prompts.c moves the icons of remapped ones); the
+// first one the table names, -1 when no face button does.
+static void face_report(int layout) {
+    static const int8_t face_of[PAD_COUNT] = {[PAD_SOUTH] = 1, [PAD_EAST] = 2, [PAD_WEST] = 3, [PAD_NORTH] = 4};
+    int8_t phys[4] = {-1, -1, -1, -1};
+    const PadBinding *t = input_map.pads[layout];
+    for (int i = 0; i < input_map.npads[layout]; i++)
+        if (t[i].action <= B_Y && face_of[t[i].pad] && phys[t[i].action] < 0) phys[t[i].action] = (int8_t)(face_of[t[i].pad] - 1);
+    prompts_face(layout, phys);
+}
+
 static int pad_read(uint64_t *b, int32_t sl[2], int32_t sr[2]) {
     uint8_t pd[PAD_COUNT] = {0};
     if (!pad_physical(pd)) return 0;
-    *b |= input_map_pad_buttons(pd, pad_layout_get());
+    int layout = pad_layout_get();
+    *b |= input_map_pad_buttons(pd, layout);
+    face_report(layout);
     stick(SDL_GAMEPAD_AXIS_LEFTX, SDL_GAMEPAD_AXIS_LEFTY, stick_dead_get(0), sl);
     stick(SDL_GAMEPAD_AXIS_RIGHTX, SDL_GAMEPAD_AXIS_RIGHTY, stick_dead_get(1), sr);
     return 1;
@@ -683,7 +697,9 @@ static void poll_merged(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx
     if (state > 0) {
         binds_refresh();
         if (state == 1) {
-            pad_read(&b, sl, sr);
+            // without a gamepad yet, the icons follow the layout setting, so the game's first upload of its button
+            // atlas already has them where the pad will press them
+            if (!pad_read(&b, sl, sr)) face_report(input_pad_layout_pick(cfg_value("ACR_PAD_LAYOUT"), 0));
             // ACR_INVERT_LX / LY / RX / RY: the gamepad's stick axes mirrored (the camera's, mostly), before the
             // sticks become direction buttons. Keyboard and mouse keep their directions: they have bindings.
             static unsigned inv_seen = ~0u;
@@ -824,6 +840,13 @@ uint16_t rumble_motor(float a, float curve, float strength) {
 
 int input_pad_layout(void) {
     return (int)plat_cas32(&pad_layout_shown, 0, 0);
+}
+
+void input_face_refresh(void) {
+    plat_mutex_lock(&lock);
+    binds_refresh();
+    face_report(pad_layout >= 0 ? pad_layout : input_pad_layout_pick(cfg_value("ACR_PAD_LAYOUT"), pad_east_a));
+    plat_mutex_unlock(&lock);
 }
 
 int input_pad_label(int pad_id) {

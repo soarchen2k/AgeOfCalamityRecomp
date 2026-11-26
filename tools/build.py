@@ -724,6 +724,40 @@ def assemble_dist(args, exe: Path, sysroot: Path, host: Path, xl: Path) -> Path:
     return dist
 
 
+def touch_changed_sources(work: Path) -> None:
+    """Gives a fresh date to every source whose content changed since the last build in this work folder. The build
+    steps compare dates (step_gen, ninja), but a release unpacked over an older folder keeps the dates of the archive,
+    which can be older than the previous build's outputs (another time zone, a clock behind): nothing was rebuilt and
+    the old executable ran on (issue #13). <work>/source-hashes.json keeps size, date and SHA-256 per file; a file
+    whose size or date moved is hashed again, and touched if its content differs. The first run touches everything."""
+    import hashlib
+    stamp = work / "source-hashes.json"
+    try:
+        old = json.loads(stamp.read_text())
+    except (OSError, ValueError):
+        old = {}
+    new, touched = {}, 0
+    for top in (RUNTIME, ROOT / "recomp", ROOT / "assets"):
+        for p in top.rglob("*"):
+            if not p.is_file() or "__pycache__" in p.parts:
+                continue
+            key = p.relative_to(ROOT).as_posix()
+            st = p.stat()
+            prev = old.get(key)
+            if prev and prev[0] == st.st_size and prev[1] == st.st_mtime_ns:
+                new[key] = prev
+                continue
+            digest = hashlib.sha256(p.read_bytes()).hexdigest()
+            if not prev or prev[2] != digest:
+                os.utime(p)
+                touched += 1
+                st = p.stat()
+            new[key] = [st.st_size, st.st_mtime_ns, digest]
+    stamp.write_text(json.dumps(new, sort_keys=True))
+    if touched:
+        print(f"sources: {touched} files new or changed since the last build here, dated now so they build again")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--work", type=Path, required=True, help="build folder on the Linux disk (e.g. ~/AgeOfCalamityRecomp-build)")
@@ -745,6 +779,7 @@ def main(argv=None) -> int:
     args.work.mkdir(parents=True, exist_ok=True)
     if not (args.exefs / "main").exists():
         step_extract(args)
+    touch_changed_sources(args.work)
     gen = step_gen(args) if "gen" in args.steps else args.work / "generated"
     lib = step_guest(args, gen) if "guest" in args.steps else args.work / "lib" / "libacr_guest.a"
     if "host" in args.steps:

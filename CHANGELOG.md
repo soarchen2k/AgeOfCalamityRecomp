@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.7
+
+### Fixed
+- **Sound turning metallic after a while** (#18, #13; Linux and Steam Deck, after 5 to 25 minutes): once the sound card
+  had run a little ahead of the PC, the audio was mixed in bursts, and the game's own sound effects, which it works
+  out between two mixes, could not keep up. Mixes now stay evenly spaced, as TotK Recomp does, and Linux keeps a little
+  more audio queued (60 ms).
+- **Crash at the end of the first mission** on a new save (#16).
+- **Button prompts after a remap** (#17): when A, B, X or Y is remapped, the prompts show the button that now does the
+  action (from the next start).
+- **Steam Deck plugged into a TV or a monitor**: the game now runs in docked mode there, with its sharper picture.
+- **Linux update**: an update unpacked over an older folder now always rebuilds the game (it could keep the old one).
+
+### Changed
+- The game's log notes once a minute any audio problem it saw (skipped audio, starved sounds, late mixes).
+
+## 0.3.6
+
+### Fixed
+- **Sound turning choppy and robotic after a few minutes** (#13, seen on Steam Deck and Linux): when the sound card
+  plays slightly faster than the PC's clock, the queued audio slowly ran out and, after 4 to 5 minutes, every bit of
+  sound came with a gap. The audio now follows the sound card's pace when it falls behind. The log also notes, once a
+  minute, any audio that went missing.
+
 ## 0.3.5
 
 ### Fixed

@@ -8,9 +8,11 @@
 // into its destination mix, folds the submixes, runs the mix effects and writes the device sink's stereo mix into a
 // single-producer single-consumer ring. The SDL audio thread drains that ring without taking any lock: an empty ring
 // plays silence and never blocks the render thread or the guest. ACR_AUDIO=none (or ACR_AUDIO_OFF) mixes without a
-// device; ACR_AUDIO_PREFILL_MS (0..500, default 20) is the queued audio the output waits for after start or underrun.
+// device; ACR_AUDIO_PREFILL_MS (0..500, default 20, 60 on Linux) is the queued audio the output waits for after start or
+// underrun.
 // The device's clock paces the render thread, as the audio hardware paces the Switch's DSP (audio_mixer_pace_ns): a
-// frame is rendered when the ring holds less than the output target, max(prefill, two device periods), so the queue and
+// frame is rendered when the ring holds less than the output target, max(prefill, two device periods), and at least 4/5
+// of a frame after the previous one (render_thread: the game's AUX effects need that time), so the queue and
 // the delay from the game to the speakers stay there and the host and device clocks cannot drift apart. LASRecomp and
 // SavageWindRecomp pace their renderers by the SDL stream the same way. Without a device, while the renderer is
 // stopped and while the device takes nothing (a stall), the render thread keeps real time on its own timer; what piled
@@ -69,6 +71,7 @@ typedef struct Mixer {
     float *voice_peak; uint32_t *voice_frames;     // ACR_TRACE=audio: per voice since the last census (voice_census)
     float mix_peak_in[256], mix_peak_out[256];     // ACR_TRACE=audio: per mix, before and after its effects
     int prefill;                                   // render blocks
+    uint64_t health_underruns, health_skipped, health_overruns, health_dry, health_unanswered;   // at the last once-a-minute line (level_note)
 } Mixer;
 
 static _Atomic float device_volume = 1.0f;
@@ -102,8 +105,16 @@ static void report_once(Mixer *m, unsigned bit, const char *msg, int value) {
 // ---- output: SDL3 audio stream fed from the ring
 // How much audio the output waits for before it starts, and again after an underrun: ACR_AUDIO_PREFILL_MS rounded up
 // to whole 5 ms render blocks. Returns -1 for a value outside 0..500 ms.
+// The Linux default is higher, as in TotK Recomp (valentderah/totk-pc-recomp, MIT): at 20 ms the PipeWire queue
+// (max(prefill, two 1024-sample periods)) underran thousands of times within minutes in busy scenes there, and 60 ms
+// removed the underruns.
+#ifdef __linux__
+#define PREFILL_DEFAULT_MS 60
+#else
+#define PREFILL_DEFAULT_MS 20
+#endif
 static int prefill_blocks_for(const char *e) {
-    if (!e || !*e) return 4;
+    if (!e || !*e) return PREFILL_DEFAULT_MS / 5;
     char *end;
     double ms = strtod(e, &end);
     if (end == e || *end || !(ms >= 0) || ms > 500) return -1;
@@ -346,11 +357,10 @@ int64_t audio_mixer_pace_ns(AudioRenderer *r, uint64_t now) {
     uint64_t pulled = atomic_load_explicit(&m->pulled_ns, memory_order_acquire);
     if (!pulled || (now > pulled && now - pulled > __atomic_load_n(&m->stall_ns, __ATOMIC_RELAXED))) return -1;
     uint64_t have = atomic_load(&m->wr) - atomic_load_explicit(&m->rd, memory_order_acquire);
-    // one more render fits above the target
-    uint64_t full = (uint64_t)__atomic_load_n(&m->target, __ATOMIC_RELAXED) + (uint64_t)m->frame;
-    if (have < full) return 0;
-    int64_t ns = (int64_t)((have - full + 1) * 1000000000ull / (uint64_t)m->rate);
-    return ns < 500000 ? 500000 : ns;   // until the device has taken it below the target again
+    uint64_t target = (uint64_t)__atomic_load_n(&m->target, __ATOMIC_RELAXED);
+    if (have < target) return 0;
+    int64_t ns = (int64_t)((have - target + 1) * 1000000000ull / (uint64_t)m->rate);
+    return ns < 500000 ? 500000 : ns;   // until the device has taken it below the target
 }
 
 // Render thread only.
@@ -475,6 +485,25 @@ static void voice_census(AudioRenderer *r, Mixer *m) {
 // Level meter (ACR_TRACE=audio): one line per 5 s of output, and the first nonzero frame.
 static void level_note(AudioRenderer *r, Mixer *m, const float *lr, int frames) {
     diag_audio(lr, frames);
+    // Without ACR_TRACE=audio as well: once a minute, when something was heard wrong since the last line, so a
+    // player's log shows it (issue #13): the device found audio missing (underruns), queued audio was skipped after a
+    // stall, a render found the queue full and was dropped, or a playing voice ran out of the game's wave buffers.
+    if (m->device_ok && r->elapsed_frames % ((uint64_t)r->param.sample_rate * 60 / (uint64_t)m->frame) == 0) {
+        uint64_t under = atomic_load(&m->underruns), skipped = atomic_load(&m->skipped_frames),
+                 over = atomic_load(&m->overruns), dry = r->dry_voices, lone = r->unanswered;
+        if (under != m->health_underruns || skipped != m->health_skipped || over != m->health_overruns ||
+            dry != m->health_dry || lone != m->health_unanswered) {
+            rt_log("audio: in the last minute: %llu underruns (%llu frames missing in all), %llu frames skipped, %llu "
+                   "renders dropped, %llu times a voice ran out of the game's audio, %llu renders with the game two "
+                   "behind; %.1f ms queued, target %.1f ms",
+                   (unsigned long long)(under - m->health_underruns), (unsigned long long)atomic_load(&m->missing_frames),
+                   (unsigned long long)(skipped - m->health_skipped), (unsigned long long)(over - m->health_overruns),
+                   (unsigned long long)(dry - m->health_dry), (unsigned long long)(lone - m->health_unanswered),
+                   (atomic_load(&m->wr) - atomic_load(&m->rd)) * 1000.0 / m->rate, m->target * 1000.0 / m->rate);
+            m->health_underruns = under, m->health_skipped = skipped, m->health_overruns = over, m->health_dry = dry;
+            m->health_unanswered = lone;
+        }
+    }
     if (!(rt_trace & RT_TRACE_AUDIO)) return;
     int sound = 0;
     for (int k = 0; k < 2 * frames; k++) {
@@ -534,8 +563,8 @@ void audio_mixer_open(AudioRenderer *r) {
     const char *pe = cfg_get("ACR_AUDIO_PREFILL_MS");
     m->prefill = prefill_blocks_for(pe);
     if (m->prefill < 0) {
-        rt_log("audio: ACR_AUDIO_PREFILL_MS=%s is not 0..500 ms: using 20", pe);
-        m->prefill = 4;
+        rt_log("audio: ACR_AUDIO_PREFILL_MS=%s is not 0..500 ms: using %d", pe, PREFILL_DEFAULT_MS);
+        m->prefill = PREFILL_DEFAULT_MS / 5;
     }
     r->mixer = m;
     atomic_store(&m->playing, r->state == 0);

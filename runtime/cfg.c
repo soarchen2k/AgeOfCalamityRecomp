@@ -282,6 +282,7 @@ int cfg_load(const char *path) {
 // notebook since 2026-11-12 (minimap markers, cutscenes, menus), but not measured on the Deck yet: not the default.
 // Age of Calamity: 30 fps (the game's own rate; it steps a fixed amount per update, so a lower cap would slow it down)
 // and the Switch's handheld mode, whose render resolution is the game's lighter one: the owner wants the Deck spared.
+// On a TV or a monitor (deck_external_display) docked mode instead, as a docked Switch: handheld's picture is blurry there.
 // Both are rows of the quick menu (L3+R3 held). Starting points to replace with measured ones (docs/NOTES.md, Steam Deck).
 // REPLAY_ASYNC: the NVN->Vulkan replay off the game's main thread. In the first battle it took 21% of that thread on an
 // i5-11400H (nvnQueueSubmitCommands, 7 ms a frame; 15-20 ms on the Deck) and 1% with it on, the image the same; the
@@ -311,6 +312,29 @@ static int on_steam_deck(void) {
            (!strcmp(product, "Jupiter") || !strcmp(product, "Galileo"));
 }
 
+// The Deck plugged into a TV or a monitor (issue #13: blurry when docked): a connected display other than its own panel
+// (eDP), which is what its dock or a USB-C cable adds (/sys/class/drm/card*-DP-1, -HDMI-A-1). Read once, at the first
+// question, so the mode reported to the game holds for the session; the quick menu (L3+R3) still switches it.
+static int deck_external_display(void) {
+#ifdef __linux__
+    static int found = -1;
+    if (found >= 0) return found;
+    found = 0;
+    char path[96], status[32];
+    static const char *const kinds[] = {"DP", "HDMI-A"};
+    for (int card = 0; card < 4 && !found; card++)
+        for (int k = 0; k < 2 && !found; k++)
+            for (int n = 1; n <= 4 && !found; n++) {
+                snprintf(path, sizeof path, "/sys/class/drm/card%d-%s-%d/status", card, kinds[k], n);
+                found = read_line(path, status, sizeof status) && !strcmp(status, "connected");
+            }
+    if (found) rt_log("cfg: Steam Deck on an external display: docked mode");
+    return found;
+#else
+    return 0;
+#endif
+}
+
 static const char *raw_get(const char *name);
 
 static int profile_of(void) {
@@ -338,6 +362,7 @@ static const char *raw_get(const char *name) {
 const char *cfg_get(const char *name) {
     const char *v = raw_get(name);
     if (v || strncmp(name, PREFIX, PREFIX_LEN) || !profile_of()) return v;
+    if (!strcasecmp(name + PREFIX_LEN, "OPERATION_MODE") && deck_external_display()) return "docked";
     for (size_t i = 0; i < sizeof DECK / sizeof *DECK; i++)
         if (!strcasecmp(DECK[i].key, name + PREFIX_LEN)) return DECK[i].value;
     return NULL;

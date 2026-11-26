@@ -82,6 +82,7 @@ static void voice_reset(ServerVoice *v) {
     v->offset = 0;
     v->fraction = 0;
     v->played = 0;
+    v->dry = 0;
     v->consumed = 0;
     v->loops_done = 0;
     memset(&v->adpcm, 0, sizeof v->adpcm);
@@ -166,6 +167,7 @@ static void voices_prepare(AudioRenderer *r) {
             }
             v->offset = 0;
             v->played = 0;
+            v->dry = 0;
             v->fraction = 0;
             v->loops_done = 0;
             v->state = SV_STOPPED;
@@ -335,6 +337,10 @@ static void request_update(AudioRenderer *r, const uint8_t *input, uint64_t in_s
 // or every sample_count / sample_rate seconds of the host clock without a device, while stopped or while it stalls
 static void advance_voice(AudioRenderer *r, ServerVoice *v, double out_seconds) {
     if (!v->in.in_use || v->state != SV_STARTED || !v->in.sample_rate) return;
+    if (v->dry && v->valid[v->index]) {
+        r->dry_voices++;
+        v->dry = 0;
+    }
     double want = v->fraction + out_seconds * v->in.sample_rate * (v->in.pitch > 0 ? v->in.pitch : 1.0);
     uint64_t samples = (uint64_t)want;
     v->fraction = want - (double)samples;
@@ -362,6 +368,10 @@ static void advance_voice(AudioRenderer *r, ServerVoice *v, double out_seconds) 
         }
         skip_empty(r, v);
     }
+    // Still owed samples with no buffer left, and not after an end of stream: the voice ran dry. It counts (the
+    // once-a-minute audio line) when it then gets buffers again: a stream the game did not feed in time, which skips.
+    // A sound that just ends without an end of stream gets no more buffers and does not count.
+    if (samples && v->played) v->dry = 1;
 }
 
 static void render_thread(void *p) {
@@ -369,7 +379,18 @@ static void render_thread(void *p) {
     plat_thread_priority(PLAT_PRIO_HIGHEST);
     const uint64_t frame_ns = (uint64_t)r->param.sample_count * 1000000000ull / (uint64_t)r->param.sample_rate;
     const double frame = (double)r->param.sample_count / r->param.sample_rate;
-    uint64_t next = kern_now_ns();
+    // On the Switch the DSP renders one frame every 5 ms and the game's audio thread works in between: Age of Calamity
+    // runs its own effects on the CPU through AUX effects whose rings hold only 4 frames, and it answers each frame
+    // with a RequestUpdate. Frames rendered back to back (the device took a period of 4-5 frames, or the render thread
+    // woke late) leave it no time: the AUX return ring is read before the game refilled it, and the sound turns
+    // metallic. Frames therefore stay at least 4/5 of a frame apart, which still refills a device period well before
+    // the device drains it, as TotK Recomp's render thread does (valentderah/totk-pc-recomp, MIT). Issue #18: 0.3.6
+    // rendered at once whenever the queue fell a device period below its target, and a sound card whose clock runs
+    // fast brought it there after minutes (25 on a Linux desktop, 6-8 on a Steam Deck): from then on frames came in
+    // bursts and the sound stayed metallic.
+    const uint64_t gap_ns = frame_ns * 4 / 5;
+    uint64_t next = kern_now_ns(), last = 0, seen_updates = 0;
+    int behind = 0;   // frames rendered since the game's last RequestUpdate
     while (plat_cas32(&r->running, 0, 0)) {
         uint64_t now = kern_now_ns();
         int64_t pace = audio_mixer_pace_ns(r, now);
@@ -377,16 +398,27 @@ static void render_thread(void *p) {
             plat_wait_ns((uint64_t)pace);
             continue;
         }
+        if (last && now - last < gap_ns) {
+            plat_wait_ns(gap_ns - (now - last));
+            continue;
+        }
         if (pace == 0) {
-            if (now < next) {
-                plat_wait_ns(next - now);   // the Switch DSP renders one frame per frame_ns: wait for our slot
+            next = now + frame_ns;   // the device paces: where the timer goes on if it stops
+        } else {
+            if (next > now) {
+                plat_wait_ns(next - now);   // no device, stopped or stalled: one frame per frame_ns of the host clock
                 continue;
             }
-        } else {
-            if (next > now) plat_wait_ns(next - now);
-            else if (now - next > 100000000ull) next = now;   // fell far behind (debugger, sleep): resynchronise
+            if (now - next > 100000000ull) next = now;   // fell far behind (debugger, sleep): resynchronise
+            next += frame_ns;
         }
-        next += frame_ns;   // advances at exactly one frame per render; late wakes are absorbed by the next render
+        last = kern_now_ns();
+        uint64_t updates = __atomic_load_n(&r->updates, __ATOMIC_RELAXED);   // counted under the lock by RequestUpdate
+        if (updates != seen_updates) {
+            seen_updates = updates;
+            behind = 0;
+        }
+        if (++behind >= 3) r->unanswered++;
         plat_mutex_lock(&r->lock);
         if (r->state == 0) {
             voices_prepare(r);

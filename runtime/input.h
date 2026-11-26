@@ -29,6 +29,9 @@ int input_player2_connected(void);
 int input_rumble2(uint16_t low, uint16_t high, uint32_t ms);   // input_rumble on player 2's gamepad
 // The gamepad layout in effect (PAD_LAYOUT_*, input_map.h; ACR_PAD_LAYOUT, live); -1 without a gamepad. Any thread.
 int input_pad_layout(void);
+// Hands prompts.c (prompts_face) the face buttons' bindings in effect now, before the first poll too: the game uploads
+// its button atlas once, at start. Any thread.
+void input_face_refresh(void);
 // How far the open gamepad's left (pct[0]) and right (pct[1]) sticks are from the centre now, in percent of full
 // deflection, before the dead zone: the menu shows it on the dead zone rows, so a drifting stick's resting value can be
 // read off. 0 (and both 0) without a connected gamepad. Any thread.

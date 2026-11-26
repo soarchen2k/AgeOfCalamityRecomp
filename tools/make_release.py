@@ -111,7 +111,9 @@ def tcltk(stage: Path) -> list:
     out = (stage / "tcltk").resolve()
     shutil.rmtree(out, ignore_errors=True)
     msi = (DL / TCLTK[0].rsplit("/", 1)[1]).resolve()
-    subprocess.run(["msiexec", "/a", str(msi), "/qn", f"TARGETDIR={out}"], check=True)
+    # msiexec opens no path with forward slashes (error 1619), which MSYS2's Python gives
+    win = lambda p: str(p).replace("/", "\\")
+    subprocess.run(["msiexec", "/a", win(msi), "/qn", f"TARGETDIR={win(out)}"], check=True)
     files = [(f"python/{f.name}", 0o644, f.read_bytes()) for f in sorted((out / "DLLs").iterdir()) if f.is_file()]
     for top in ("Lib/tkinter", "tcl/tcl8", "tcl/tcl8.6", "tcl/tk8.6"):
         for f in sorted((out / top).rglob("*")):
